@@ -13,9 +13,9 @@ service cloud.firestore {
     }
 
     match /submissions/{submissionId} {
-      // Users can create submissions if authenticated
-      // Admin can do everything
-      allow create: if isAuthenticated();
+      // Allow anyone to create a submission (unauthenticated)
+      // Only admins can read, update, or delete
+      allow create: if true;
       allow read, update, delete: if isAdmin();
     }
     

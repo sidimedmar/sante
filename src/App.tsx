@@ -47,8 +47,36 @@ import {
   serverTimestamp,
   Timestamp
 } from 'firebase/firestore';
-import { signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
+import { 
+  signInWithEmailAndPassword, 
+  onAuthStateChanged, 
+  signOut, 
+  signInAnonymously,
+  GoogleAuthProvider,
+  signInWithPopup
+} from 'firebase/auth';
 import type { FormState } from './types';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+  }
+}
 
 const MAURITANIA_REGIONS: Record<string, string[]> = {
   "نواكشوط الغربية (Nouakchott Ouest)": ["تفرغ زينة (Tevragh Zeina)", "القصر (Ksar)", "السبخة (Sebkha)"],
@@ -90,6 +118,7 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedSubmission, setSelectedSubmission] = useState<any | null>(null);
   const [formData, setFormData] = useState<FormState>({
     wilaya: '',
     moughataa: '',
@@ -109,8 +138,44 @@ export default function App() {
     q7: ['', ''],
   });
 
+  const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
+    const errInfo: FirestoreErrorInfo = {
+      error: error instanceof Error ? error.message : String(error),
+      authInfo: {
+        userId: auth.currentUser?.uid,
+        email: auth.currentUser?.email,
+        emailVerified: auth.currentUser?.emailVerified,
+        isAnonymous: auth.currentUser?.isAnonymous,
+      },
+      operationType,
+      path
+    };
+    console.error('Firestore Error: ', JSON.stringify(errInfo));
+    alert("حدث خطأ أثناء حفظ البيانات. يرجى التحقق من الاتصال.");
+    throw new Error(JSON.stringify(errInfo));
+  };
+
   useEffect(() => {
-    if (role === 'admin') {
+    const testConnection = async () => {
+      try {
+        const { getDocFromServer, doc } = await import('firebase/firestore');
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration. The client is offline.");
+        }
+      }
+    };
+    testConnection();
+
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setUser(user);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (role === 'admin' && auth.currentUser) {
       const q = query(collection(db, 'submissions'), orderBy('submittedAt', 'desc'));
       const unsubscribe = onSnapshot(q, (snapshot) => {
         const data = snapshot.docs.map(doc => ({
@@ -118,29 +183,88 @@ export default function App() {
           ...doc.data()
         }));
         setSubmissions(data);
+      }, (error) => {
+        console.error("Snapshot listener error:", error);
+        if (error.code === 'permission-denied') {
+          // If permission denied, maybe the auth state is stale or user isn't admin
+          setRole(null);
+          setLoginError('انتهت صلاحية الجلسة أو ليس لديك صلاحيات المسؤول');
+        }
       });
       return () => unsubscribe();
     }
-  }, [role]);
+  }, [role, user]);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
-    // For this demo, we use the requested mock logic but we could use Firebase Auth
-    // However, the user specifically asked for these credentials in previous turn
-    if (loginData.username === 'admin' && loginData.password === 'admin125') {
-      setRole('admin');
-      setLoginError('');
-    } else if (loginData.username === 'user' && loginData.password === 'user2026') {
-      setRole('user');
-      setLoginError('');
-    } else {
-      setLoginError('اسم المستخدم أو كلمة المرور غير صحيحة');
+    setLoginError('');
+    try {
+      if (loginData.username === 'admin' && loginData.password === 'admin125') {
+        // Admin must sign in with Google FIRST to verify identity
+        const provider = new GoogleAuthProvider();
+        const result = await signInWithPopup(auth, provider);
+        
+        if (result.user.email === 'sidiahm@gmail.com') {
+          setRole('admin');
+          setLoginError('');
+        } else {
+          setLoginError('هذا الحساب ليس لديه صلاحيات المسؤول');
+          await signOut(auth);
+        }
+      } else if (loginData.username === 'user' && loginData.password === 'user2026') {
+        setRole('user');
+        setLoginError('');
+      } else {
+        setLoginError('اسم المستخدم أو كلمة المرور غير صحيحة');
+      }
+    } catch (error: any) {
+      console.error("Login error:", error);
+      if (error.code === 'auth/popup-closed-by-user' || error.code === 'auth/cancelled-popup-request') {
+        setLoginError('تم إلغاء عملية تسجيل الدخول. يرجى المحاولة مرة أخرى وعدم إغلاق النافذة المنبثقة.');
+      } else if (error.code === 'auth/admin-restricted-operation') {
+        setLoginError('هذه العملية مقيدة. يرجى استخدام زر "الدخول عبر جوجل" المخصص للمدراء.');
+      } else if (error.code === 'auth/popup-blocked') {
+        setLoginError('تم حظر النافذة المنبثقة. يرجى السماح بالنوافذ المنبثقة لهذا الموقع.');
+      } else {
+        setLoginError('فشل الاتصال بالخادم: ' + (error.message || 'خطأ غير معروف'));
+      }
     }
     setIsLoading(false);
   };
 
-  const handleLogout = () => {
+  const handleGoogleLogin = async () => {
+    setIsLoading(true);
+    setLoginError('');
+    try {
+      const provider = new GoogleAuthProvider();
+      // Add custom parameters to force account selection if needed
+      provider.setCustomParameters({ prompt: 'select_account' });
+      
+      const result = await signInWithPopup(auth, provider);
+      if (result.user.email === 'sidiahm@gmail.com') {
+        setRole('admin');
+        setLoginError('');
+      } else {
+        setRole('user');
+        // Optional: you might want to sign out if they aren't the intended admin
+        // await signOut(auth);
+      }
+    } catch (error: any) {
+      console.error("Google login error:", error);
+      if (error.code === 'auth/popup-closed-by-user' || error.code === 'auth/cancelled-popup-request') {
+        setLoginError('تم إغلاق نافذة تسجيل الدخول. يرجى المحاولة مرة أخرى.');
+      } else if (error.code === 'auth/popup-blocked') {
+        setLoginError('يرجى السماح بالنوافذ المنبثقة في متصفحك لإتمام تسجيل الدخول.');
+      } else {
+        setLoginError('فشل تسجيل الدخول عبر جوجل. يرجى المحاولة لاحقاً.');
+      }
+    }
+    setIsLoading(false);
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
     setRole(null);
     setLoginData({ username: '', password: '' });
     setStep(0);
@@ -248,8 +372,7 @@ export default function App() {
           q7: ['', ''],
         });
       } catch (error) {
-        console.error("Error saving submission:", error);
-        alert("حدث خطأ أثناء حفظ البيانات");
+        handleFirestoreError(error, OperationType.WRITE, editingId ? `submissions/${editingId}` : 'submissions');
       }
       setIsLoading(false);
     }
@@ -260,7 +383,7 @@ export default function App() {
       try {
         await deleteDoc(doc(db, 'submissions', id));
       } catch (error) {
-        console.error("Error deleting:", error);
+        handleFirestoreError(error, OperationType.DELETE, `submissions/${id}`);
       }
     }
   };
@@ -302,6 +425,20 @@ export default function App() {
       'سنوات الخدمة': s.yearsOfService,
       'تاريخ الإرسال': s.submittedAt?.toDate().toLocaleString('ar-MR'),
       'تعريف الاتصال': s.q1,
+      'مقاربة ١': s.q2?.[0] || '',
+      'مقاربة ٢': s.q2?.[1] || '',
+      'استراتيجية ١': s.q3?.[0] || '',
+      'استراتيجية ٢': s.q3?.[1] || '',
+      'تقنية ١': s.q4?.[0] || '',
+      'تقنية ٢': s.q4?.[1] || '',
+      'تقنية ٣': s.q4?.[2] || '',
+      'وسيط ١': s.q5?.[0] || '',
+      'وسيط ٢': s.q5?.[1] || '',
+      'قدرة ١': s.q6?.[0] || '',
+      'قدرة ٢': s.q6?.[1] || '',
+      'قدرة ٣': s.q6?.[2] || '',
+      'مرحلة ١': s.q7?.[0] || '',
+      'مرحلة ٢': s.q7?.[1] || '',
     }));
 
     const wb = XLSX.utils.book_new();
@@ -320,10 +457,41 @@ export default function App() {
       const wb = XLSX.read(bstr, { type: 'binary' });
       const wsname = wb.SheetNames[0];
       const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json(ws);
+      const data = XLSX.utils.sheet_to_json(ws) as any[];
       
-      // Basic import logic - would need mapping for real use
-      alert(`تم العثور على ${data.length} سجل. هذه الميزة تتطلب مطابقة الحقول.`);
+      setIsLoading(true);
+      let count = 0;
+      try {
+        for (const row of data) {
+          const importData = {
+            name: row['الاسم'] || '',
+            wilaya: row['الولاية'] || '',
+            moughataa: row['المقاطعة'] || '',
+            whatsapp: String(row['الوتساب'] || ''),
+            educationLevel: row['المستوى الدراسي'] || '',
+            lastCertificate: row['آخر شهادة'] || '',
+            field: row['المجال'] || '',
+            yearsOfService: String(row['سنوات الخدمة'] || '0'),
+            q1: row['تعريف الاتصال'] || '',
+            q2: [row['مقاربة ١'] || '', row['مقاربة ٢'] || ''],
+            q3: [row['استراتيجية ١'] || '', row['استراتيجية ٢'] || ''],
+            q4: [row['تقنية ١'] || '', row['تقنية ٢'] || '', row['تقنية ٣'] || ''],
+            q5: [row['وسيط ١'] || '', row['وسيط ٢'] || ''],
+            q6: [row['قدرة ١'] || '', row['قدرة ٢'] || '', row['قدرة ٣'] || ''],
+            q7: [row['مرحلة ١'] || '', row['مرحلة ٢'] || ''],
+            location: { latitude: null, longitude: null },
+            submittedAt: serverTimestamp(),
+            role: 'admin'
+          };
+          await addDoc(collection(db, 'submissions'), importData);
+          count++;
+        }
+        alert(`تم استيراد ${count} سجل بنجاح`);
+      } catch (error) {
+        console.error("Import error:", error);
+        alert("حدث خطأ أثناء الاستيراد. يرجى التأكد من صيغة الملف.");
+      }
+      setIsLoading(false);
     };
     reader.readAsBinaryString(file);
   };
@@ -444,7 +612,26 @@ export default function App() {
               className="w-full py-4 bg-green-700 text-white rounded-xl font-bold hover:bg-green-800 transition-all shadow-md flex items-center justify-center space-x-2 space-x-reverse"
             >
               <span>دخول</span>
-              <ChevronLeft className="w-5 h-5" />
+              {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <ChevronLeft className="w-5 h-5" />}
+            </button>
+
+            <div className="relative py-4">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-200"></div>
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-white px-4 text-slate-500 font-medium">دخول المسؤولين (Admin)</span>
+              </div>
+            </div>
+
+            <button 
+              type="button"
+              onClick={handleGoogleLogin}
+              disabled={isLoading}
+              className="w-full py-3 bg-white border-2 border-green-600 text-green-700 rounded-xl font-bold hover:bg-green-50 transition-all flex items-center justify-center space-x-3 space-x-reverse shadow-sm disabled:opacity-50"
+            >
+              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="Google" />
+              <span>الدخول الآمن عبر جوجل</span>
             </button>
           </form>
 
@@ -511,6 +698,123 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans" dir="rtl">
+      {/* View Modal */}
+      <AnimatePresence>
+        {selectedSubmission && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" dir="rtl">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-green-700 text-white">
+                <div className="flex items-center gap-3">
+                  <UserCircle className="w-6 h-6 text-yellow-400" />
+                  <h3 className="text-xl font-bold">{selectedSubmission.name}</h3>
+                </div>
+                <button 
+                  onClick={() => setSelectedSubmission(null)}
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                >
+                  <Plus className="w-6 h-6 rotate-45" />
+                </button>
+              </div>
+
+              <div className="p-6 overflow-y-auto space-y-8 text-right">
+                {/* Personal & Professional */}
+                <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">الولاية / المقاطعة</label>
+                    <p className="text-slate-700 font-medium">{selectedSubmission.wilaya} - {selectedSubmission.moughataa}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">الوتساب</label>
+                    <p className="text-slate-700 font-medium">{selectedSubmission.whatsapp}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">المستوى الدراسي</label>
+                    <p className="text-slate-700 font-medium">{selectedSubmission.educationLevel}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">سنوات الخدمة</label>
+                    <p className="text-slate-700 font-medium">{selectedSubmission.yearsOfService} سنة</p>
+                  </div>
+                </section>
+
+                <hr className="border-slate-100" />
+
+                {/* Assessment Questions */}
+                <div className="space-y-6">
+                  <h4 className="font-bold text-green-700 flex items-center gap-2">
+                    <BookOpen className="w-5 h-5" />
+                    <span>نتائج التقييم المعارفي</span>
+                  </h4>
+                  
+                  <div className="space-y-4">
+                    <div className="bg-slate-50 p-4 rounded-xl">
+                      <p className="text-xs font-bold text-slate-500 mb-2">١. تعريف الاتصال العام:</p>
+                      <p className="text-slate-800 leading-relaxed">{selectedSubmission.q1 || '---'}</p>
+                    </div>
+
+                    {[
+                      { label: '٢. مقاربات الاتصال', data: selectedSubmission.q2 },
+                      { label: '٣. استراتيجيات الاتصال', data: selectedSubmission.q3 },
+                      { label: '٤. تقنيات الاتصال البيني', data: selectedSubmission.q4 },
+                      { label: '٥. أنواع الوسائط الاتصالية', data: selectedSubmission.q5 },
+                      { label: '٦. قدرات المنعش أو المسهل', data: selectedSubmission.q6 },
+                      { label: '٧. مراحل تغيير السلوك', data: selectedSubmission.q7 },
+                    ].map((q, idx) => (
+                      <div key={idx} className="bg-slate-50 p-4 rounded-xl">
+                        <p className="text-xs font-bold text-slate-500 mb-2">{q.label}:</p>
+                        <ul className="list-disc list-inside space-y-1 text-slate-800">
+                          {q.data?.map((item: string, i: number) => (
+                            <li key={i}>{item || '---'}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {selectedSubmission.location?.latitude && (
+                  <div className="pt-4">
+                    <a 
+                      href={`https://www.google.com/maps?q=${selectedSubmission.location.latitude},${selectedSubmission.location.longitude}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-center gap-2 w-full py-3 bg-blue-50 text-blue-700 rounded-xl font-bold hover:bg-blue-100 transition-colors"
+                    >
+                      <MapPin className="w-5 h-5" />
+                      <span>عرض الموقع على الخريطة</span>
+                    </a>
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 bg-slate-50 border-t border-slate-100 flex gap-3">
+                <button 
+                  onClick={() => {
+                    handleEdit(selectedSubmission);
+                    setSelectedSubmission(null);
+                  }}
+                  className="flex-1 py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                >
+                  <Edit2 className="w-4 h-4" />
+                  <span>تعديل البيانات</span>
+                </button>
+                <button 
+                  onClick={() => setSelectedSubmission(null)}
+                  className="px-8 py-3 bg-white border border-slate-200 text-slate-600 rounded-xl font-bold hover:bg-slate-100 transition-colors"
+                >
+                  إغلاق
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <header className="bg-green-700 text-white shadow-lg sticky top-0 z-50">
         <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
@@ -622,6 +926,13 @@ export default function App() {
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-2">
+                            <button 
+                              onClick={() => setSelectedSubmission(s)}
+                              className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                              title="عرض التفاصيل"
+                            >
+                              <Search className="w-4 h-4" />
+                            </button>
                             <button 
                               onClick={() => handleEdit(s)}
                               className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
