@@ -1,0 +1,5 @@
+{
+  "name": "Identification des Besoins en Formation - Ministère de la Santé",
+  "description": "Application de collecte des besoins en formation pour le Programme National d'Éducation pour la Santé (Mauritanie).",
+  "requestFramePermissions": ["geolocation"]
+}

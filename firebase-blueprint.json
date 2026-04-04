@@ -1,0 +1,42 @@
+{
+  "entities": {
+    "submission": {
+      "title": "User Submission",
+      "description": "Evaluation data submitted by a user",
+      "type": "object",
+      "properties": {
+        "wilaya": { "type": "string" },
+        "moughataa": { "type": "string" },
+        "name": { "type": "string" },
+        "whatsapp": { "type": "string" },
+        "educationLevel": { "type": "string" },
+        "lastCertificate": { "type": "string" },
+        "field": { "type": "string" },
+        "yearsOfService": { "type": "string" },
+        "location": {
+          "type": "object",
+          "properties": {
+            "latitude": { "type": "number" },
+            "longitude": { "type": "number" }
+          }
+        },
+        "q1": { "type": "string" },
+        "q2": { "type": "array", "items": { "type": "string" } },
+        "q3": { "type": "array", "items": { "type": "string" } },
+        "q4": { "type": "array", "items": { "type": "string" } },
+        "q5": { "type": "array", "items": { "type": "string" } },
+        "q6": { "type": "array", "items": { "type": "string" } },
+        "q7": { "type": "array", "items": { "type": "string" } },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "submittedBy": { "type": "string" }
+      },
+      "required": ["wilaya", "moughataa", "name", "whatsapp", "educationLevel", "lastCertificate", "field", "yearsOfService", "submittedAt"]
+    }
+  },
+  "firestore": {
+    "/submissions/{submissionId}": {
+      "schema": "submission",
+      "description": "Collection of all user evaluations"
+    }
+  }
+}
