@@ -226,6 +226,8 @@ export default function App() {
         setLoginError('هذه العملية مقيدة. يرجى استخدام زر "الدخول عبر جوجل" المخصص للمدراء.');
       } else if (error.code === 'auth/popup-blocked') {
         setLoginError('تم حظر النافذة المنبثقة. يرجى السماح بالنوافذ المنبثقة لهذا الموقع.');
+      } else if (error.code === 'auth/unauthorized-domain') {
+        setLoginError('هذا النطاق غير مصرح به. يرجى إضافة النطاق الحالي إلى قائمة النطاقات المصرح بها في Firebase Console.');
       } else {
         setLoginError('فشل الاتصال بالخادم: ' + (error.message || 'خطأ غير معروف'));
       }
@@ -256,6 +258,8 @@ export default function App() {
         setLoginError('تم إغلاق نافذة تسجيل الدخول. يرجى المحاولة مرة أخرى.');
       } else if (error.code === 'auth/popup-blocked') {
         setLoginError('يرجى السماح بالنوافذ المنبثقة في متصفحك لإتمام تسجيل الدخول.');
+      } else if (error.code === 'auth/unauthorized-domain') {
+        setLoginError('هذا النطاق غير مصرح به. يرجى إضافة النطاق الحالي إلى قائمة النطاقات المصرح بها في Firebase Console.');
       } else {
         setLoginError('فشل تسجيل الدخول عبر جوجل. يرجى المحاولة لاحقاً.');
       }
