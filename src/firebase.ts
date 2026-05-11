@@ -1,11 +1,3 @@
-import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
-
-// Import the Firebase configuration
-import firebaseConfig from '../firebase-applet-config.json';
-
-// Initialize Firebase SDK
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-export const auth = getAuth();
+// Firebase has been replaced by Supabase.
+// This file is kept for reference only and is no longer imported.
+export {};

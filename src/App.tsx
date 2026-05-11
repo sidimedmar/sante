@@ -33,50 +33,10 @@ import {
   Loader2
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { db, auth } from './firebase';
-import { 
-  collection, 
-  addDoc, 
-  getDocs, 
-  updateDoc, 
-  deleteDoc, 
-  doc, 
-  onSnapshot, 
-  query, 
-  orderBy,
-  serverTimestamp,
-  Timestamp
-} from 'firebase/firestore';
-import { 
-  signInWithEmailAndPassword, 
-  onAuthStateChanged, 
-  signOut, 
-  signInAnonymously,
-  GoogleAuthProvider,
-  signInWithPopup
-} from 'firebase/auth';
+import { supabase } from './lib/supabase';
 import type { FormState } from './types';
 
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
 
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId: string | undefined;
-    email: string | null | undefined;
-    emailVerified: boolean | undefined;
-    isAnonymous: boolean | undefined;
-  }
-}
 
 const MAURITANIA_REGIONS: Record<string, string[]> = {
   "نواكشوط الغربية (Nouakchott Ouest)": ["تفرغ زينة (Tevragh Zeina)", "القصر (Ksar)", "السبخة (Sebkha)"],
@@ -138,134 +98,65 @@ export default function App() {
     q7: ['', ''],
   });
 
-  const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
-    const errInfo: FirestoreErrorInfo = {
-      error: error instanceof Error ? error.message : String(error),
-      authInfo: {
-        userId: auth.currentUser?.uid,
-        email: auth.currentUser?.email,
-        emailVerified: auth.currentUser?.emailVerified,
-        isAnonymous: auth.currentUser?.isAnonymous,
-      },
-      operationType,
-      path
-    };
-    console.error('Firestore Error: ', JSON.stringify(errInfo));
-    alert("حدث خطأ أثناء حفظ البيانات. يرجى التحقق من الاتصال.");
-    throw new Error(JSON.stringify(errInfo));
+  // Fetch submissions from Supabase
+  const fetchSubmissions = async () => {
+    const { data, error } = await supabase
+      .from('submissions')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      console.error('Error fetching submissions:', error);
+      return;
+    }
+    setSubmissions(data || []);
   };
 
   useEffect(() => {
-    const testConnection = async () => {
-      try {
-        const { getDocFromServer, doc } = await import('firebase/firestore');
-        await getDocFromServer(doc(db, 'test', 'connection'));
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Please check your Firebase configuration. The client is offline.");
-        }
-      }
-    };
-    testConnection();
-
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setUser(user);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (role === 'admin' && auth.currentUser) {
-      const q = query(collection(db, 'submissions'), orderBy('submittedAt', 'desc'));
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        const data = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-        setSubmissions(data);
-      }, (error) => {
-        console.error("Snapshot listener error:", error);
-        if (error.code === 'permission-denied') {
-          // If permission denied, maybe the auth state is stale or user isn't admin
-          setRole(null);
-          setLoginError('انتهت صلاحية الجلسة أو ليس لديك صلاحيات المسؤول');
-        }
-      });
-      return () => unsubscribe();
+    if (role === 'admin') {
+      fetchSubmissions();
+      
+      // Set up realtime subscription
+      const channel = supabase
+        .channel('submissions_changes')
+        .on('postgres_changes', 
+          { event: '*', schema: 'public', table: 'submissions' },
+          () => {
+            fetchSubmissions();
+          }
+        )
+        .subscribe();
+      
+      return () => {
+        supabase.removeChannel(channel);
+      };
     }
-  }, [role, user]);
+  }, [role]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setLoginError('');
-    try {
-      if (loginData.username === 'admin' && loginData.password === 'admin125') {
-        // Admin must sign in with Google FIRST to verify identity
-        const provider = new GoogleAuthProvider();
-        const result = await signInWithPopup(auth, provider);
-        
-        if (result.user.email === 'sidiahm@gmail.com') {
-          setRole('admin');
-          setLoginError('');
-        } else {
-          setLoginError('هذا الحساب ليس لديه صلاحيات المسؤول');
-          await signOut(auth);
-        }
-      } else if (loginData.username === 'user' && loginData.password === 'user2026') {
-        setRole('user');
-        setLoginError('');
-      } else {
-        setLoginError('اسم المستخدم أو كلمة المرور غير صحيحة');
-      }
-    } catch (error: any) {
-      console.error("Login error:", error);
-      if (error.code === 'auth/popup-closed-by-user' || error.code === 'auth/cancelled-popup-request') {
-        setLoginError('تم إلغاء عملية تسجيل الدخول. يرجى المحاولة مرة أخرى وعدم إغلاق النافذة المنبثقة.');
-      } else if (error.code === 'auth/admin-restricted-operation') {
-        setLoginError('هذه العملية مقيدة. يرجى استخدام زر "الدخول عبر جوجل" المخصص للمدراء.');
-      } else if (error.code === 'auth/popup-blocked') {
-        setLoginError('تم حظر النافذة المنبثقة. يرجى السماح بالنوافذ المنبثقة لهذا الموقع.');
-      } else {
-        setLoginError('فشل الاتصال بالخادم: ' + (error.message || 'خطأ غير معروف'));
-      }
+    
+    // Simple credential-based login (no external auth needed)
+    if (loginData.username === 'admin' && loginData.password === 'admin125') {
+      setRole('admin');
+      setUser({ email: 'admin@pnes.mr', role: 'admin' });
+      setLoginError('');
+    } else if (loginData.username === 'user' && loginData.password === 'user2026') {
+      setRole('user');
+      setUser({ email: 'user@pnes.mr', role: 'user' });
+      setLoginError('');
+    } else {
+      setLoginError('اسم المستخدم أو كلمة المرور غير صحيحة');
     }
+    
     setIsLoading(false);
   };
 
-  const handleGoogleLogin = async () => {
-    setIsLoading(true);
-    setLoginError('');
-    try {
-      const provider = new GoogleAuthProvider();
-      // Add custom parameters to force account selection if needed
-      provider.setCustomParameters({ prompt: 'select_account' });
-      
-      const result = await signInWithPopup(auth, provider);
-      if (result.user.email === 'sidiahm@gmail.com') {
-        setRole('admin');
-        setLoginError('');
-      } else {
-        setRole('user');
-        // Optional: you might want to sign out if they aren't the intended admin
-        // await signOut(auth);
-      }
-    } catch (error: any) {
-      console.error("Google login error:", error);
-      if (error.code === 'auth/popup-closed-by-user' || error.code === 'auth/cancelled-popup-request') {
-        setLoginError('تم إغلاق نافذة تسجيل الدخول. يرجى المحاولة مرة أخرى.');
-      } else if (error.code === 'auth/popup-blocked') {
-        setLoginError('يرجى السماح بالنوافذ المنبثقة في متصفحك لإتمام تسجيل الدخول.');
-      } else {
-        setLoginError('فشل تسجيل الدخول عبر جوجل. يرجى المحاولة لاحقاً.');
-      }
-    }
-    setIsLoading(false);
-  };
-
-  const handleLogout = async () => {
-    await signOut(auth);
+  const handleLogout = () => {
     setRole(null);
+    setUser(null);
     setLoginData({ username: '', password: '' });
     setStep(0);
     setIsSubmitted(false);
@@ -339,17 +230,42 @@ export default function App() {
       setIsLoading(true);
       try {
         const dataToSave = {
-          ...formData,
-          submittedAt: serverTimestamp(),
-          role: role
+          full_name: formData.name,
+          wilaya: formData.wilaya,
+          moughataa: formData.moughataa,
+          phone: formData.whatsapp,
+          years_experience: formData.yearsOfService,
+          position: formData.field,
+          service: formData.lastCertificate,
+          health_structure: formData.educationLevel,
+          assessment_data: {
+            q1: formData.q1,
+            q2: formData.q2,
+            q3: formData.q3,
+            q4: formData.q4,
+            q5: formData.q5,
+            q6: formData.q6,
+            q7: formData.q7,
+            location: formData.location
+          },
+          status: 'pending'
         };
 
         if (editingId) {
-          await updateDoc(doc(db, 'submissions', editingId), dataToSave);
+          const { error } = await supabase
+            .from('submissions')
+            .update({ ...dataToSave, updated_at: new Date().toISOString() })
+            .eq('id', editingId);
+          
+          if (error) throw error;
           setEditingId(null);
           setShowAdminPanel(true);
         } else {
-          await addDoc(collection(db, 'submissions'), dataToSave);
+          const { error } = await supabase
+            .from('submissions')
+            .insert([dataToSave]);
+          
+          if (error) throw error;
         }
         
         setIsSubmitted(true);
@@ -372,7 +288,8 @@ export default function App() {
           q7: ['', ''],
         });
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, editingId ? `submissions/${editingId}` : 'submissions');
+        console.error('Submit error:', error);
+        alert("حدث خطأ أثناء حفظ البيانات. يرجى التحقق من الاتصال.");
       }
       setIsLoading(false);
     }
@@ -381,31 +298,38 @@ export default function App() {
   const handleDelete = async (id: string) => {
     if (window.confirm('هل أنت متأكد من حذف هذه الاستمارة؟')) {
       try {
-        await deleteDoc(doc(db, 'submissions', id));
+        const { error } = await supabase
+          .from('submissions')
+          .delete()
+          .eq('id', id);
+        
+        if (error) throw error;
       } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `submissions/${id}`);
+        console.error('Delete error:', error);
+        alert("حدث خطأ أثناء حذف البيانات.");
       }
     }
   };
 
   const handleEdit = (submission: any) => {
+    const assessmentData = submission.assessment_data || {};
     setFormData({
-      wilaya: submission.wilaya,
-      moughataa: submission.moughataa,
-      name: submission.name,
-      whatsapp: submission.whatsapp,
-      educationLevel: submission.educationLevel,
-      lastCertificate: submission.lastCertificate,
-      field: submission.field,
-      yearsOfService: submission.yearsOfService,
-      location: submission.location || { latitude: null, longitude: null },
-      q1: submission.q1,
-      q2: submission.q2,
-      q3: submission.q3,
-      q4: submission.q4,
-      q5: submission.q5,
-      q6: submission.q6,
-      q7: submission.q7,
+      wilaya: submission.wilaya || '',
+      moughataa: submission.moughataa || '',
+      name: submission.full_name || '',
+      whatsapp: submission.phone || '',
+      educationLevel: submission.health_structure || '',
+      lastCertificate: submission.service || '',
+      field: submission.position || '',
+      yearsOfService: submission.years_experience || '',
+      location: assessmentData.location || { latitude: null, longitude: null },
+      q1: assessmentData.q1 || '',
+      q2: assessmentData.q2 || ['', ''],
+      q3: assessmentData.q3 || ['', ''],
+      q4: assessmentData.q4 || ['', '', ''],
+      q5: assessmentData.q5 || ['', ''],
+      q6: assessmentData.q6 || ['', '', ''],
+      q7: assessmentData.q7 || ['', ''],
     });
     setEditingId(submission.id);
     setShowAdminPanel(false);
@@ -414,32 +338,35 @@ export default function App() {
   };
 
   const exportAllToExcel = () => {
-    const data = submissions.map(s => ({
-      'الاسم': s.name,
-      'الولاية': s.wilaya,
-      'المقاطعة': s.moughataa,
-      'الوتساب': s.whatsapp,
-      'المستوى الدراسي': s.educationLevel,
-      'آخر شهادة': s.lastCertificate,
-      'المجال': s.field,
-      'سنوات الخدمة': s.yearsOfService,
-      'تاريخ الإرسال': s.submittedAt?.toDate().toLocaleString('ar-MR'),
-      'تعريف الاتصال': s.q1,
-      'مقاربة ١': s.q2?.[0] || '',
-      'مقاربة ٢': s.q2?.[1] || '',
-      'استراتيجية ١': s.q3?.[0] || '',
-      'استراتيجية ٢': s.q3?.[1] || '',
-      'تقنية ١': s.q4?.[0] || '',
-      'تقنية ٢': s.q4?.[1] || '',
-      'تقنية ٣': s.q4?.[2] || '',
-      'وسيط ١': s.q5?.[0] || '',
-      'وسيط ٢': s.q5?.[1] || '',
-      'قدرة ١': s.q6?.[0] || '',
-      'قدرة ٢': s.q6?.[1] || '',
-      'قدرة ٣': s.q6?.[2] || '',
-      'مرحلة ١': s.q7?.[0] || '',
-      'مرحلة ٢': s.q7?.[1] || '',
-    }));
+    const data = submissions.map(s => {
+      const ad = s.assessment_data || {};
+      return {
+        'الاسم': s.full_name,
+        'الولاية': s.wilaya,
+        'المقاطعة': s.moughataa,
+        'الوتساب': s.phone,
+        'المستوى الدراسي': s.health_structure,
+        'آخر شهادة': s.service,
+        'المجال': s.position,
+        'سنوات الخدمة': s.years_experience,
+        'تاريخ الإرسال': s.created_at ? new Date(s.created_at).toLocaleString('ar-MR') : '',
+        'تعريف الاتصال': ad.q1 || '',
+        'مقاربة ١': ad.q2?.[0] || '',
+        'مقاربة ٢': ad.q2?.[1] || '',
+        'استراتيجية ١': ad.q3?.[0] || '',
+        'استراتيجية ٢': ad.q3?.[1] || '',
+        'تقنية ١': ad.q4?.[0] || '',
+        'تقنية ٢': ad.q4?.[1] || '',
+        'تقنية ٣': ad.q4?.[2] || '',
+        'وسيط ١': ad.q5?.[0] || '',
+        'وسيط ٢': ad.q5?.[1] || '',
+        'قدرة ١': ad.q6?.[0] || '',
+        'قدرة ٢': ad.q6?.[1] || '',
+        'قدرة ٣': ad.q6?.[2] || '',
+        'مرحلة ١': ad.q7?.[0] || '',
+        'مرحلة ٢': ad.q7?.[1] || '',
+      };
+    });
 
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(data);
@@ -460,18 +387,17 @@ export default function App() {
       const data = XLSX.utils.sheet_to_json(ws) as any[];
       
       setIsLoading(true);
-      let count = 0;
       try {
-        for (const row of data) {
-          const importData = {
-            name: row['الاسم'] || '',
-            wilaya: row['الولاية'] || '',
-            moughataa: row['المقاطعة'] || '',
-            whatsapp: String(row['الوتساب'] || ''),
-            educationLevel: row['المستوى الدراسي'] || '',
-            lastCertificate: row['آخر شهادة'] || '',
-            field: row['المجال'] || '',
-            yearsOfService: String(row['سنوات الخدمة'] || '0'),
+        const importDataArray = data.map(row => ({
+          full_name: row['الاسم'] || '',
+          wilaya: row['الولاية'] || '',
+          moughataa: row['المقاطعة'] || '',
+          phone: String(row['الوتساب'] || ''),
+          health_structure: row['المستوى الدراسي'] || '',
+          service: row['آخر شهادة'] || '',
+          position: row['المجال'] || '',
+          years_experience: String(row['سنوات الخدمة'] || '0'),
+          assessment_data: {
             q1: row['تعريف الاتصال'] || '',
             q2: [row['مقاربة ١'] || '', row['مقاربة ٢'] || ''],
             q3: [row['استراتيجية ١'] || '', row['استراتيجية ٢'] || ''],
@@ -479,14 +405,17 @@ export default function App() {
             q5: [row['وسيط ١'] || '', row['وسيط ٢'] || ''],
             q6: [row['قدرة ١'] || '', row['قدرة ٢'] || '', row['قدرة ٣'] || ''],
             q7: [row['مرحلة ١'] || '', row['مرحلة ٢'] || ''],
-            location: { latitude: null, longitude: null },
-            submittedAt: serverTimestamp(),
-            role: 'admin'
-          };
-          await addDoc(collection(db, 'submissions'), importData);
-          count++;
-        }
-        alert(`تم استيراد ${count} سجل بنجاح`);
+            location: { latitude: null, longitude: null }
+          },
+          status: 'pending'
+        }));
+        
+        const { error } = await supabase
+          .from('submissions')
+          .insert(importDataArray);
+        
+        if (error) throw error;
+        alert(`تم استيراد ${data.length} سجل بنجاح`);
       } catch (error) {
         console.error("Import error:", error);
         alert("حدث خطأ أثناء الاستيراد. يرجى التأكد من صيغة الملف.");
@@ -615,29 +544,11 @@ export default function App() {
               {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <ChevronLeft className="w-5 h-5" />}
             </button>
 
-            <div className="relative py-4">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-slate-200"></div>
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-white px-4 text-slate-500 font-medium">دخول المسؤولين (Admin)</span>
-              </div>
-            </div>
-
-            <button 
-              type="button"
-              onClick={handleGoogleLogin}
-              disabled={isLoading}
-              className="w-full py-3 bg-white border-2 border-green-600 text-green-700 rounded-xl font-bold hover:bg-green-50 transition-all flex items-center justify-center space-x-3 space-x-reverse shadow-sm disabled:opacity-50"
-            >
-              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="Google" />
-              <span>الدخول الآمن عبر جوجل</span>
-            </button>
           </form>
 
           <div className="bg-blue-50 p-4 rounded-xl border border-blue-100">
             <p className="text-blue-700 text-xs text-center font-medium">
-              حساب المستخدم: user / user2026
+              حساب المستخدم: user / user2026 | حساب المسؤول: admin / admin125
             </p>
           </div>
         </motion.div>
@@ -711,7 +622,7 @@ export default function App() {
               <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-green-700 text-white">
                 <div className="flex items-center gap-3">
                   <UserCircle className="w-6 h-6 text-yellow-400" />
-                  <h3 className="text-xl font-bold">{selectedSubmission.name}</h3>
+                  <h3 className="text-xl font-bold">{selectedSubmission.full_name}</h3>
                 </div>
                 <button 
                   onClick={() => setSelectedSubmission(null)}
@@ -730,15 +641,15 @@ export default function App() {
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">الوتساب</label>
-                    <p className="text-slate-700 font-medium">{selectedSubmission.whatsapp}</p>
+                    <p className="text-slate-700 font-medium">{selectedSubmission.phone}</p>
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">المستوى الدراسي</label>
-                    <p className="text-slate-700 font-medium">{selectedSubmission.educationLevel}</p>
+                    <p className="text-slate-700 font-medium">{selectedSubmission.health_structure}</p>
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs font-bold text-slate-400 uppercase">سنوات الخدمة</label>
-                    <p className="text-slate-700 font-medium">{selectedSubmission.yearsOfService} سنة</p>
+                    <p className="text-slate-700 font-medium">{selectedSubmission.years_experience} سنة</p>
                   </div>
                 </section>
 
@@ -754,16 +665,16 @@ export default function App() {
                   <div className="space-y-4">
                     <div className="bg-slate-50 p-4 rounded-xl">
                       <p className="text-xs font-bold text-slate-500 mb-2">١. تعريف الاتصال العام:</p>
-                      <p className="text-slate-800 leading-relaxed">{selectedSubmission.q1 || '---'}</p>
+                      <p className="text-slate-800 leading-relaxed">{selectedSubmission.assessment_data?.q1 || '---'}</p>
                     </div>
 
                     {[
-                      { label: '٢. مقاربات الاتصال', data: selectedSubmission.q2 },
-                      { label: '٣. استراتيجيات الاتصال', data: selectedSubmission.q3 },
-                      { label: '٤. تقنيات الاتصال البيني', data: selectedSubmission.q4 },
-                      { label: '٥. أنواع الوسائط الاتصالية', data: selectedSubmission.q5 },
-                      { label: '٦. قدرات المنعش أو المسهل', data: selectedSubmission.q6 },
-                      { label: '٧. مراحل تغيير السلوك', data: selectedSubmission.q7 },
+                      { label: '٢. مقاربات الاتصال', data: selectedSubmission.assessment_data?.q2 },
+                      { label: '٣. استراتيجيات الاتصال', data: selectedSubmission.assessment_data?.q3 },
+                      { label: '٤. تقنيات الاتصال البيني', data: selectedSubmission.assessment_data?.q4 },
+                      { label: '٥. أنواع الوسائط الاتصالية', data: selectedSubmission.assessment_data?.q5 },
+                      { label: '٦. قدرات المنعش أو المسهل', data: selectedSubmission.assessment_data?.q6 },
+                      { label: '٧. مراحل تغيير السلوك', data: selectedSubmission.assessment_data?.q7 },
                     ].map((q, idx) => (
                       <div key={idx} className="bg-slate-50 p-4 rounded-xl">
                         <p className="text-xs font-bold text-slate-500 mb-2">{q.label}:</p>
@@ -777,10 +688,10 @@ export default function App() {
                   </div>
                 </div>
 
-                {selectedSubmission.location?.latitude && (
+                {selectedSubmission.assessment_data?.location?.latitude && (
                   <div className="pt-4">
                     <a 
-                      href={`https://www.google.com/maps?q=${selectedSubmission.location.latitude},${selectedSubmission.location.longitude}`}
+                      href={`https://www.google.com/maps?q=${selectedSubmission.assessment_data.location.latitude},${selectedSubmission.assessment_data.location.longitude}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="flex items-center justify-center gap-2 w-full py-3 bg-blue-50 text-blue-700 rounded-xl font-bold hover:bg-blue-100 transition-colors"
@@ -910,20 +821,19 @@ export default function App() {
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {submissions
-                      .filter(s => s.name?.toLowerCase().includes(searchTerm.toLowerCase()) || s.moughataa?.toLowerCase().includes(searchTerm.toLowerCase()))
+                      .filter(s => s.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) || s.moughataa?.toLowerCase().includes(searchTerm.toLowerCase()))
                       .map((s) => (
                       <tr key={s.id} className="hover:bg-slate-50 transition-colors">
                         <td className="px-6 py-4">
-                          <div className="font-bold text-slate-800">{s.name}</div>
-                          <div className="text-xs text-slate-500">{s.whatsapp}</div>
+                          <div className="font-bold text-slate-800">{s.full_name}</div>
+                          <div className="text-xs text-slate-500">{s.phone}</div>
                         </td>
                         <td className="px-6 py-4">
                           <div className="text-sm text-slate-700">{s.wilaya}</div>
                           <div className="text-xs text-slate-500">{s.moughataa}</div>
                         </td>
                         <td className="px-6 py-4 text-sm text-slate-500">
-                          {s.submittedAt?.toDate().toLocaleDateString('ar-MR')}
-                        </td>
+                          {s.created_at ? new Date(s.created_at).toLocaleDateString('ar-MR') : ''}</td>
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-2">
                             <button 
